@@ -1,0 +1,240 @@
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer      = Players.LocalPlayer
+local Camera           = workspace.CurrentCamera
+
+if _G.AimbotConnection then
+    _G.AimbotConnection:Disconnect()
+    _G.AimbotConnection = nil
+end
+
+if _G.AimbotCircle and _G.AimbotCircle.Remove then
+    pcall(function() _G.AimbotCircle:Remove() end)
+    _G.AimbotCircle = nil
+end
+
+if _G.EspFolder and _G.EspFolder.Destroy then
+    pcall(function() _G.EspFolder:Destroy() end)
+    _G.EspFolder = nil
+end
+
+if _G.TracerCache then
+    for _, obj in pairs(_G.TracerCache) do
+        pcall(function() if obj and obj.Remove then obj:Remove() end end)
+    end
+    _G.TracerCache = {}
+end
+
+local fovCircle = Drawing.new("Circle")
+fovCircle.Filled       = false
+fovCircle.Position     = Vector2.new(0, 0)
+fovCircle.Visible      = _G.AimbotConfig.FovVisible
+fovCircle.Thickness    = _G.AimbotConfig.FovThickness
+fovCircle.Transparency = 1 - _G.AimbotConfig.FovTransparency
+fovCircle.Color        = _G.AimbotConfig.FindTargetColor
+
+local espFolder = Instance.new("Folder")
+espFolder.Name  = "AimbotESP_Folder"
+espFolder.Parent = workspace
+
+_G.AimbotCircle = fovCircle
+_G.EspFolder    = espFolder
+_G.TracerCache  = {}
+
+local function CreateBox(player)
+    local char = player.Character or player.CharacterAdded:Wait()
+    local hrp  = char:WaitForChild("HumanoidRootPart", 5)
+    if not hrp then return end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name       = player.Name .. "_Box"
+    billboard.AlwaysOnTop = true
+    billboard.Size       = UDim2.new(4, 0, 5.5, 0)
+    billboard.Adornee    = hrp
+    billboard.Parent     = espFolder
+
+    local frame = Instance.new("Frame")
+    frame.Size                 = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundTransparency = 1
+    frame.BorderSizePixel      = 0
+    frame.Parent               = billboard
+
+    local uiStroke = Instance.new("UIStroke")
+    uiStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    uiStroke.LineJoinMode    = Enum.LineJoinMode.Miter
+    uiStroke.Parent          = frame
+
+    return billboard
+end
+
+local function GetTracerOrigin()
+    local size = Camera.ViewportSize
+    local pos  = _G.AimbotConfig.TracerPosition
+
+    if pos == "Top"    then return Vector2.new(size.X / 2, 0)            end
+    if pos == "Middle" then return Vector2.new(size.X / 2, size.Y / 2)   end
+    if pos == "Left"   then return Vector2.new(0, size.Y / 2)            end
+    if pos == "Right"  then return Vector2.new(size.X, size.Y / 2)       end
+    return Vector2.new(size.X / 2, size.Y)
+end
+
+local function IsVisible(part, character)
+    local params = RaycastParams.new()
+    params.FilterType             = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {LocalPlayer.Character, Camera, character, espFolder}
+
+    local result = workspace:Raycast(
+        Camera.CFrame.Position,
+        part.Position - Camera.CFrame.Position,
+        params
+    )
+
+    return not result
+end
+
+local function GetTargetData()
+    if not _G.AimbotConfig.AimbotEnabled then return nil end
+
+    local mousePos    = UserInputService:GetMouseLocation()
+    local shortestDist = _G.AimbotConfig.FovRadius
+    local best        = nil
+    local teamsExist  = #game:GetService("Teams"):GetTeams() > 1
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer or not player.Character then
+            continue
+        end
+
+        if _G.AimbotConfig.TeamCheck and teamsExist and player.Team == LocalPlayer.Team then
+            continue
+        end
+
+        local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+        if _G.AimbotConfig.AliveCheck and (not humanoid or humanoid.Health <= 0) then
+            continue
+        end
+
+        local part = player.Character:FindFirstChild(_G.AimbotConfig.LockMode)
+            or player.Character:FindFirstChild("HumanoidRootPart")
+        if not part then continue end
+
+        if _G.AimbotConfig.WallCheck and not IsVisible(part, player.Character) then
+            continue
+        end
+
+        local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+        if not onScreen then continue end
+
+        local dist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+        if dist < shortestDist then
+            shortestDist = dist
+            best = {
+                Position = Vector2.new(screenPos.X, screenPos.Y),
+                WorldPos = part.Position,
+                Player   = player,
+                Part     = part
+            }
+        end
+    end
+
+    return best
+end
+
+Players.PlayerRemoving:Connect(function(player)
+    if _G.TracerCache[player.Name] then
+        pcall(function() _G.TracerCache[player.Name]:Remove() end)
+        _G.TracerCache[player.Name] = nil
+    end
+end)
+
+_G.AimbotConnection = RunService.RenderStepped:Connect(function()
+    local mousePos     = UserInputService:GetMouseLocation()
+    local tracerOrigin = GetTracerOrigin()
+
+    fovCircle.Position     = mousePos
+    fovCircle.Radius       = _G.AimbotConfig.FovRadius
+    fovCircle.Visible      = _G.AimbotConfig.FovVisible
+    fovCircle.Thickness    = _G.AimbotConfig.FovThickness
+    fovCircle.Transparency = 1 - _G.AimbotConfig.FovTransparency
+
+    local holdingRmb = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    local target     = GetTargetData()
+    local targetPlayer = target and target.Player
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+
+        local box    = espFolder:FindFirstChild(player.Name .. "_Box")
+        local tracer = _G.TracerCache[player.Name] or Drawing.new("Line")
+        _G.TracerCache[player.Name] = tracer
+
+        if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local hrp      = player.Character.HumanoidRootPart
+            local hrpPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+            local visible  = IsVisible(hrp, player.Character)
+
+            local color = _G.AimbotConfig.FindTargetColor
+            if player == targetPlayer then
+                color = holdingRmb and _G.AimbotConfig.LockingTargetColor
+                    or _G.AimbotConfig.FoundTargetColor
+            end
+
+            if _G.AimbotConfig.BoxEnabled then
+                if not box then box = CreateBox(player) end
+                if box then
+                    box.Adornee = hrp
+                    box.Enabled = onScreen and (not _G.AimbotConfig.BoxWallCheck or visible)
+
+                    local stroke = box.Frame.UIStroke
+                    if stroke then
+                        stroke.Color        = color
+                        stroke.Thickness    = _G.AimbotConfig.BoxThickness
+                        stroke.Transparency = _G.AimbotConfig.BoxTransparency
+                    end
+                end
+            elseif box then
+                box.Enabled = false
+            end
+
+            if _G.AimbotConfig.TracerEnabled then
+                local show = onScreen and (not _G.AimbotConfig.TracerWallCheck or visible)
+                tracer.Visible = show
+
+                if show then
+                    tracer.From         = tracerOrigin
+                    tracer.To           = Vector2.new(hrpPos.X, hrpPos.Y)
+                    tracer.Color        = color
+                    tracer.Thickness    = _G.AimbotConfig.TracerThickness
+                    tracer.Transparency = 1 - _G.AimbotConfig.TracerTransparency
+                end
+            else
+                tracer.Visible = false
+            end
+        else
+            if box   then box.Enabled   = false end
+            if tracer then tracer.Visible = false end
+        end
+    end
+
+    if _G.AimbotConfig.AimbotEnabled and target and holdingRmb then
+        fovCircle.Color = _G.AimbotConfig.LockingTargetColor
+
+        local lerpAlpha = math.clamp(1 - (_G.AimbotConfig.Smoothness / 100), 0.01, 1)
+
+        if _G.AimbotConfig.AimbotMethod == "Camera" then
+            local currentLook = Camera.CFrame.LookVector
+            local desiredLook = (target.WorldPos - Camera.CFrame.Position).Unit
+            local newLook     = currentLook:Lerp(desiredLook, lerpAlpha)
+
+            Camera.CFrame = CFrame.new(Camera.CFrame.Position, Camera.CFrame.Position + newLook)
+        else
+            local diffX = (target.Position.X - mousePos.X) * lerpAlpha
+            local diffY = (target.Position.Y - mousePos.Y) * lerpAlpha
+            mousemoverel(math.floor(diffX), math.floor(diffY))
+        end
+    else
+        fovCircle.Color = target and _G.AimbotConfig.FoundTargetColor
+            or _G.AimbotConfig.FindTargetColor
+    end
+end)
